@@ -2,6 +2,7 @@ streamlit==1.40.2
 azure-search-documents==11.5.2  
 azure-core==1.32.0  
 azure-cosmos==4.9.0 
+azure-storage-blob==12.21.0
 openai==1.60.0  
 Pillow==11.0.0  
 certifi==2024.8.30
