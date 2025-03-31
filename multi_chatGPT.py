@@ -20,10 +20,6 @@ from azure.storage.blob import (
 )  
 from urllib.parse import urlparse, unquote, quote  
   
-# 必要に応じてプロキシ設定を有効にしてください  
-os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'
-os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'
-  
 # Azure OpenAIの設定（環境変数から取得）  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
