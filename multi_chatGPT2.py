@@ -14,11 +14,7 @@ from PIL import Image
 import certifi  
 import tiktoken  
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
-from urllib.parse import urlparse, unquote, quote  
-  
-# Proxy settings (adjust according to your environment)  
-os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
-os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
+from urllib.parse import urlparse, unquote, quote   
   
 # Azure OpenAI settings (retrieved from environment variables)  
 client = AzureOpenAI(  
@@ -324,7 +320,7 @@ def main():
             options=["セマンテック検索", "ベクトル検索"],  
             index=0  
         )  
-        topNDocuments = st.slider("取得するドキュメント数", min_value=1, max_value=30, value=5)  
+        topNDocuments = st.slider("取得するドキュメント数", min_value=1, max_value=300, value=5)  
         strictness = st.slider("厳密度 (スコアの閾値)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)  
   
     # Function for semantic search  
@@ -428,7 +424,7 @@ def main():
         messages.append({"role": "user", "content": rule_message})  
   
         # Create context for RAG. Add image information if images are uploaded  
-        initial_context = f"以下のコンテキストを参考にしてください: {context[:10000]}"  
+        initial_context = f"以下のコンテキストを参考にしてください: {context[:40000]}"  
         if st.session_state["images"]:  
             image_contents = [  
                 {  

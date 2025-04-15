@@ -363,7 +363,7 @@ def main():
         display_images()  
   
         # 過去メッセージの数  
-        past_message_count = st.slider("過去メッセージの数", min_value=1, max_value=300, value=10)  
+        past_message_count = st.slider("過去メッセージの数", min_value=1, max_value=50, value=10)  
   
         # 検索設定  
         st.header("検索設定")  
@@ -440,7 +440,7 @@ def main():
         messages = []  
         messages.append({"role": "system", "content": st.session_state.system_message})  
         messages.append({"role": "user", "content": rule_message})  
-        messages.append({"role": "user", "content": f"以下のコンテキストを参考にしてください: {context[:40000]}"})  
+        messages.append({"role": "user", "content": f"以下のコンテキストを参考にしてください: {context[:15000]}"})  
         messages.extend(  
             [{"role": m["role"], "content": m["content"]} for m in st.session_state.main_chat_messages[-(num_messages_to_include):]]  
         )  
