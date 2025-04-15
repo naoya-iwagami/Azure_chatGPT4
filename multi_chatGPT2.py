@@ -16,25 +16,25 @@ import tiktoken
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
   
-# プロキシ設定（環境に合わせて設定）  
+# Proxy settings (adjust according to your environment)  
 os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
 os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
   
-# Azure OpenAI の設定（環境変数から取得）  
+# Azure OpenAI settings (retrieved from environment variables)  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),  
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")  
 )  
   
-# Azure Cognitive Search の設定  
+# Azure Cognitive Search settings  
 search_service_endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")  
 search_service_key = os.getenv("AZURE_SEARCH_KEY")  
   
-# certifi の証明書バンドルを使用するように設定  
+# Configure certifi to use certificate bundle  
 transport = RequestsTransport(verify=certifi.where())  
   
-# Azure Cosmos DB の設定  
+# Azure Cosmos DB settings  
 cosmos_endpoint = os.getenv("AZURE_COSMOS_ENDPOINT")  
 cosmos_key = os.getenv("AZURE_COSMOS_KEY")  
 database_name = "chatdb"  
@@ -44,26 +44,26 @@ cosmos_client = CosmosClient(cosmos_endpoint, credential=cosmos_key)
 database = cosmos_client.get_database_client(database_name)  
 container = database.get_container_client(container_name)  
   
-# Azure Blob Storage の設定  
+# Azure Blob Storage settings  
 blob_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")  
 blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)  
   
-# スレッド用ロックの初期化  
+# Initialize lock for threading  
 lock = threading.Lock()  
   
-# 接続文字列からアカウントキーを抽出する関数  
+# Function to extract account key from connection string  
 def extract_account_key(connection_string):  
     pairs = [s.split("=", 1) for s in connection_string.split(";") if "=" in s]  
     conn_dict = dict(pairs)  
     return conn_dict.get("AccountKey")  
   
-# SASトークン付きのURLを生成する関数  
+# Function to generate URL with SAS token  
 def generate_sas_url(blob_url, file_name):  
     parsed_url = urlparse(blob_url)  
     account_name = parsed_url.netloc.split(".")[0]  
     container_name = parsed_url.path.split("/")[1]  
     blob_name = "/".join(parsed_url.path.split("/")[2:])  
-    blob_name = unquote(blob_name)  # デコードしてから使用  
+    blob_name = unquote(blob_name)  # Decode before use  
   
     account_key = extract_account_key(blob_connection_string)  
     expiry_time = datetime.datetime.utcnow() + datetime.timedelta(hours=1)  
@@ -83,7 +83,7 @@ def generate_sas_url(blob_url, file_name):
     return sas_url  
   
 def main():  
-    # ユーザー情報の取得（st.experimental_user の email を user_id として利用）  
+    # Retrieve user information (use email from st.experimental_user as user_id)  
     if hasattr(st, "experimental_user"):  
         user = st.experimental_user  
         if user and "email" in user:  
@@ -97,7 +97,7 @@ def main():
   
     st.title("Azure OpenAI ChatGPT with Image Upload and RAG")  
   
-    # セッションステートの初期化  
+    # Initialize session state  
     if "sidebar_messages" not in st.session_state:  
         st.session_state["sidebar_messages"] = []  
     if "main_chat_messages" not in st.session_state:  
@@ -113,7 +113,7 @@ def main():
     if "system_message" not in st.session_state:  
         st.session_state["system_message"] = st.session_state["default_system_message"]  
   
-    # サイドバー：モデル選択  
+    # Sidebar: Model selection  
     st.sidebar.header("モデル選択")  
     model_to_use = st.sidebar.selectbox(  
         "使用するモデルを選択してください",  
@@ -121,7 +121,7 @@ def main():
         index=0  
     )  
   
-    # サイドバー：インデックス選択  
+    # Sidebar: Index selection  
     st.sidebar.header("インデックス選択")  
     index_options = {  
         "通常データ": "filetest11",  
@@ -139,8 +139,9 @@ def main():
     )  
     index_name = index_options[selected_index_label]  
   
-    # 選択された index_name を用いて SearchClient を生成  
-    # ※ベクトル検索を利用するため、API バージョン "2024-07-01" を指定します  
+    # Generate SearchClient using selected index_name  
+    # Specify API version "2024-07-01" to use vector search  
+    global search_client  
     search_client = SearchClient(  
         endpoint=search_service_endpoint,  
         index_name=index_name,  
@@ -149,11 +150,11 @@ def main():
         api_version="2024-07-01"  
     )  
   
-    # 画像を base64 エンコードする関数  
+    # Function to encode image to base64  
     def encode_image(image_file):  
         return base64.b64encode(image_file.getvalue()).decode("utf-8")  
   
-    # Cosmos DB へのチャット履歴保存  
+    # Save chat history to Cosmos DB  
     def save_chat_history():  
         with lock:  
             try:  
@@ -177,7 +178,7 @@ def main():
             except Exception as e:  
                 st.error(f"チャット履歴の保存中にエラーが発生しました: {e}")  
   
-    # Cosmos DB からチャット履歴を読み込む  
+    # Load chat history from Cosmos DB  
     def load_chat_history():  
         with lock:  
             user_id = st.session_state.get("user_id")  
@@ -207,7 +208,7 @@ def main():
     if not st.session_state["sidebar_messages"]:  
         st.session_state["sidebar_messages"] = load_chat_history()  
   
-    # 新規チャットセッション開始の関数  
+    # Function to start a new chat session  
     def start_new_chat():  
         new_session_id = str(uuid.uuid4())  
         new_chat = {  
@@ -228,7 +229,7 @@ def main():
     def summarize_text(text, max_length=10):  
         return text[:max_length] + "..." if len(text) > max_length else text  
   
-    # サイドバー内の設定・履歴表示  
+    # Display settings and history in the sidebar  
     with st.sidebar:  
         st.header("システムメッセージ設定")  
         if st.session_state["current_chat_index"] is not None:  
@@ -271,22 +272,22 @@ def main():
                     system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
                     if system_message_key in st.session_state:  
                         del st.session_state[system_message_key]  
-                    st.experimental_rerun()  
+                    st.rerun()  
   
         if len(st.session_state.sidebar_messages) > max_displayed_history:  
             if st.session_state["show_all_history"]:  
                 if st.button("少なく表示"):  
                     st.session_state["show_all_history"] = False  
-                    st.experimental_rerun()  
+                    st.rerun()  
             else:  
                 if st.button("もっと見る"):  
                     st.session_state["show_all_history"] = True  
-                    st.experimental_rerun()  
+                    st.rerun()  
   
         if st.button("新しいチャット"):  
             start_new_chat()  
             st.session_state["show_all_history"] = False  
-            st.experimental_rerun()  
+            st.rerun()  
   
         st.header("画像アップロード")  
         uploaded_files = st.file_uploader(  
@@ -311,13 +312,13 @@ def main():
                 st.image(img_data["image"], caption=img_data["name"], use_container_width=True)  
                 if st.button(f"削除 {img_data['name']}", key=f"delete_{idx}"):  
                     st.session_state["images"].pop(idx)  
-                    st.experimental_rerun()  
+                    st.rerun()  
   
         display_images()  
   
         past_message_count = st.slider("過去メッセージの数", min_value=1, max_value=50, value=10)  
         st.header("検索設定")  
-        # 検索モード選択  
+        # Search mode selection  
         search_mode = st.radio(  
             "検索モードを選択してください",  
             options=["セマンテック検索", "ベクトル検索"],  
@@ -326,7 +327,7 @@ def main():
         topNDocuments = st.slider("取得するドキュメント数", min_value=1, max_value=30, value=5)  
         strictness = st.slider("厳密度 (スコアの閾値)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)  
   
-    # セマンテック検索用関数  
+    # Function for semantic search  
     def keyword_semantic_search(query, topNDocuments=5, strictness=0.1):  
         results = search_client.search(  
             search_text=query,  
@@ -342,28 +343,29 @@ def main():
         results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
         return results_list  
   
-    # ベクトル検索用関数とクエリ埋め込み取得  
+    # Function for vector search and query embedding retrieval  
     def get_query_embedding(query):  
         embedding_response = client.embeddings.create(  
-            model="text-embedding-3-small",  # ※実際のデプロイメント名に合わせてください  
+            model="text-embedding-3-small",  # Adjust to your deployment name  
             input=query  
         )  
         return embedding_response.data[0].embedding  
   
     def keyword_vector_search(query, topNDocuments=5):  
         query_embedding = get_query_embedding(query)  
-        # REST API でのベクトル クエリ要求の構造に合わせた辞書を作成  
+        # Create dictionary according to REST API structure for vector query request  
         vector_query = {  
-            "kind": "vector",              # （または、入力がテキストの場合 "text"）  
-            "vector": query_embedding,     # 数値配列（埋め込みベクトル）  
-            "exhaustive": True,            # 完全な KNN を呼び出す（オプション）  
-            "fields": "contentVector",     # 検索対象となるインデックス内のベクトルフィールド  
-            "weight": 0.5,                 # （省略可能）相対的な重み  
-            "k": topNDocuments             # 返す近傍結果の件数  
+            "kind": "vector",              # (or "text" if input is text)  
+            "vector": query_embedding,     # Numeric array (embedding vector)  
+            "exhaustive": True,            # Call complete KNN (optional)  
+            "fields": "contentVector",     # Vector field in index to be searched  
+            "weight": 0.5,                 # (optional) relative weight  
+            "k": topNDocuments             # Number of nearest results to return  
         }  
+        # Fix: Parameter name should be vector_queries  
         results = search_client.search(  
             search_text="*",  
-            vectorQueries=[vector_query],  # API バージョン 2024-07-01 の場合、vectorQueries プロパティを利用  
+            vector_queries=[vector_query],  
             select="content, filepath, url"  
         )  
         results_list = list(results)  
@@ -371,12 +373,12 @@ def main():
             results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
         return results_list  
   
-    # メッセージ内のトークン数を計算する関数  
+    # Function to calculate number of tokens in messages  
     def num_tokens_from_messages(messages, model="gpt-4"):  
         encoding = tiktoken.encoding_for_model(model)  
         num_tokens = 0  
         for message in messages:  
-            num_tokens += 4  # 各メッセージ枠用  
+            num_tokens += 4  # Per message frame  
             for key, value in message.items():  
                 if key == "content":  
                     if isinstance(value, list):  
@@ -390,28 +392,28 @@ def main():
                     else:  
                         num_tokens += len(encoding.encode(value))  
                 elif key == "name":  
-                    num_tokens -= 1  # 名前は減算  
-            num_tokens += 2  # 各メッセージ毎のオーバーヘッド  
+                    num_tokens -= 1  # Subtract for name  
+            num_tokens += 2  # Overhead per message  
         return num_tokens  
   
-    # メインチャット領域で過去メッセージの表示  
+    # Display past messages in main chat area  
     for message in st.session_state["main_chat_messages"]:  
         with st.chat_message(message["role"]):  
             st.markdown(message["content"])  
   
-    # ユーザー入力受付  
+    # User input reception  
     if prompt := st.chat_input("ご質問を入力してください:"):  
         st.session_state["main_chat_messages"].append({"role": "user", "content": prompt})  
         with st.chat_message("user"):  
             st.markdown(prompt)  
   
-        # 検索モードに応じた検索処理  
+        # Search processing according to search mode  
         if search_mode == "セマンテック検索":  
             search_results = keyword_semantic_search(prompt, topNDocuments=topNDocuments, strictness=strictness)  
         else:  
             search_results = keyword_vector_search(prompt, topNDocuments=topNDocuments)  
   
-        # 検索結果からコンテキスト文字列を構築  
+        # Construct context string from search results  
         context = "\n".join([result.get("content", "") for result in search_results])  
   
         rule_message = (  
@@ -425,7 +427,7 @@ def main():
         messages.append({"role": "system", "content": st.session_state["system_message"]})  
         messages.append({"role": "user", "content": rule_message})  
   
-        # RAG 用コンテキストの作成。画像がアップロードされていれば、画像情報も追加  
+        # Create context for RAG. Add image information if images are uploaded  
         initial_context = f"以下のコンテキストを参考にしてください: {context[:10000]}"  
         if st.session_state["images"]:  
             image_contents = [  
@@ -504,13 +506,13 @@ def main():
                 st.write(f"- 残りトークン数: {tokens_remaining}")  
   
             save_chat_history()  
-            # 画像データをクリア  
+            # Clear image data  
             st.session_state["images"] = []  
   
         except Exception as e:  
             st.error(f"エラーが発生しました: {e}")  
   
-    # チャット履歴への更新  
+    # Update chat history  
     current_index = st.session_state.get("current_chat_index")  
     if current_index is not None:  
         st.session_state.sidebar_messages[current_index]["messages"] = st.session_state["main_chat_messages"].copy()  
