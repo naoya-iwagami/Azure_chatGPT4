@@ -14,8 +14,8 @@ from PIL import Image
 import certifi  
 import tiktoken  
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
-from urllib.parse import urlparse, unquote, quote   
-  
+from urllib.parse import urlparse, unquote, quote  
+
 # Azure OpenAI settings (retrieved from environment variables)  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
@@ -317,7 +317,7 @@ def main():
         # Search mode selection  
         search_mode = st.radio(  
             "検索モードを選択してください",  
-            options=["セマンテック検索", "ベクトル検索"],  
+            options=["セマンティック検索", "ベクトル検索"],  
             index=0  
         )  
         topNDocuments = st.slider("取得するドキュメント数", min_value=1, max_value=300, value=5)  
@@ -327,8 +327,8 @@ def main():
     def keyword_semantic_search(query, topNDocuments=5, strictness=0.1):  
         results = search_client.search(  
             search_text=query,  
-            search_fields=["content"],  
-            select="content, filepath, url",  
+            search_fields=["title", "content"],  # タイトルとコンテンツを検索対象に  
+            select="title, content, filepath, url",  # titleも取得する  
             query_type="semantic",  
             semantic_configuration_name="default",  
             query_caption="extractive",  
@@ -349,20 +349,18 @@ def main():
   
     def keyword_vector_search(query, topNDocuments=5):  
         query_embedding = get_query_embedding(query)  
-        # Create dictionary according to REST API structure for vector query request  
         vector_query = {  
-            "kind": "vector",              # (or "text" if input is text)  
-            "vector": query_embedding,     # Numeric array (embedding vector)  
-            "exhaustive": True,            # Call complete KNN (optional)  
-            "fields": "contentVector",     # Vector field in index to be searched  
-            "weight": 0.5,                 # (optional) relative weight  
-            "k": topNDocuments             # Number of nearest results to return  
+            "kind": "vector",  
+            "vector": query_embedding,  
+            "exhaustive": True,  
+            "fields": "contentVector",  
+            "weight": 0.5,  
+            "k": topNDocuments  
         }  
-        # Fix: Parameter name should be vector_queries  
         results = search_client.search(  
             search_text="*",  
             vector_queries=[vector_query],  
-            select="content, filepath, url"  
+            select="title, content, filepath, url"  # titleを追加  
         )  
         results_list = list(results)  
         if results_list and "@search.score" in results_list[0]:  
@@ -404,18 +402,23 @@ def main():
             st.markdown(prompt)  
   
         # Search processing according to search mode  
-        if search_mode == "セマンテック検索":  
+        if search_mode == "セマンティック検索":  
             search_results = keyword_semantic_search(prompt, topNDocuments=topNDocuments, strictness=strictness)  
         else:  
             search_results = keyword_vector_search(prompt, topNDocuments=topNDocuments)  
   
-        # Construct context string from search results  
-        context = "\n".join([result.get("content", "") for result in search_results])  
+        # 検索結果から「ファイル名」と「内容」を組み合わせたコンテキストを作成  
+        context_parts = []  
+        for result in search_results:  
+            title = result.get("title", "タイトルなし")  
+            content_val = result.get("content", "")  
+            context_parts.append(f"ファイル名: {title}\n内容: {content_val}")  
+        context = "\n".join(context_parts)  
+        initial_context = f"以下のコンテキストを参考にしてください: {context[:40000]}"  
   
         rule_message = (  
             "回答する際は、以下のルールに従ってください：\n"  
-            "1. 簡潔かつ正確に回答してください。\n"  
-            "2. 必要に応じて、提供されたコンテキストを参照してください。\n"  
+            "必要に応じて、提供されたコンテキストを参照してください。\n"  
         )  
   
         num_messages_to_include = past_message_count * 2  
@@ -424,7 +427,7 @@ def main():
         messages.append({"role": "user", "content": rule_message})  
   
         # Create context for RAG. Add image information if images are uploaded  
-        initial_context = f"以下のコンテキストを参考にしてください: {context[:40000]}"  
+        initial_context_message = f"以下のコンテキストを参考にしてください: {context[:40000]}"  
         if st.session_state["images"]:  
             image_contents = [  
                 {  
@@ -433,9 +436,9 @@ def main():
                 }  
                 for img in st.session_state["images"]  
             ]  
-            messages.append({"role": "user", "content": [{"type": "text", "text": initial_context}] + image_contents})  
+            messages.append({"role": "user", "content": [{"type": "text", "text": initial_context_message}] + image_contents})  
         else:  
-            messages.append({"role": "user", "content": initial_context})  
+            messages.append({"role": "user", "content": initial_context_message})  
   
         messages.extend([{"role": m["role"], "content": m["content"]} for m in st.session_state["main_chat_messages"][-(num_messages_to_include):]])  
   
