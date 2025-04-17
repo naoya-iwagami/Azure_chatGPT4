@@ -15,7 +15,10 @@ import certifi
 import tiktoken  
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
-  
+
+os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'
+os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'
+
 # Azure OpenAI settings (retrieved from environment variables)  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
@@ -380,9 +383,9 @@ def main():
   
     # ハイブリッド検索：BM25, セマンティック, ベクトル検索それぞれの結果をRRFで融合  
     def hybrid_search(query, topNDocuments=5, strictness=0.1):  
-        keyword_results  = keyword_search(query, topNDocuments=topNDocuments)  
+        keyword_results = keyword_search(query, topNDocuments=topNDocuments)  
         semantic_results = keyword_semantic_search(query, topNDocuments=topNDocuments, strictness=strictness)  
-        vector_results   = keyword_vector_search(query, topNDocuments=topNDocuments)  
+        vector_results = keyword_vector_search(query, topNDocuments=topNDocuments)  
         rrf_k = 60  
         fusion_scores = {}  
         fusion_docs = {}  
@@ -432,19 +435,27 @@ def main():
         with st.chat_message(message["role"]):  
             st.markdown(message["content"])  
   
-    # User input reception  
+    # ユーザー入力受付  
     if prompt := st.chat_input("ご質問を入力してください:"):  
-        st.session_state["main_chat_messages"].append({"role": "user", "content": prompt})  
-        with st.chat_message("user"):  
-            st.markdown(prompt)  
+        # --- 修正部分：現在の入力と直前の4件の過去メッセージを連結して検索クエリを作成 ---  
+        user_input = prompt  
+        # 直前の過去メッセージ4件を抽出（存在する分だけ）  
+        recent_messages = [m["content"] for m in st.session_state["main_chat_messages"]][-4:]  
+        combined_query = user_input + " " + " ".join(recent_messages)  
+        # ------------------------------------------------------------------------------  
   
-        # 検索処理：選択された検索モードに応じて呼び出し  
+        # ユーザー入力を会話履歴に追加  
+        st.session_state["main_chat_messages"].append({"role": "user", "content": user_input})  
+        with st.chat_message("user"):  
+            st.markdown(user_input)  
+  
+        # 検索処理：選択された検索モードに応じて呼び出し（combined_query を使用）  
         if search_mode == "セマンティック検索":  
-            search_results = keyword_semantic_search(prompt, topNDocuments=topNDocuments, strictness=strictness)  
+            search_results = keyword_semantic_search(combined_query, topNDocuments=topNDocuments, strictness=strictness)  
         elif search_mode == "ベクトル検索":  
-            search_results = keyword_vector_search(prompt, topNDocuments=topNDocuments)  
+            search_results = keyword_vector_search(combined_query, topNDocuments=topNDocuments)  
         elif search_mode == "ハイブリッド検索":  
-            search_results = hybrid_search(prompt, topNDocuments=topNDocuments, strictness=strictness)  
+            search_results = hybrid_search(combined_query, topNDocuments=topNDocuments, strictness=strictness)  
   
         # 検索結果から「ファイル名」と「内容」を組み合わせたコンテキストを作成  
         context_parts = []  
