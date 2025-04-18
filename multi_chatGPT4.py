@@ -15,9 +15,6 @@ import certifi
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
   
-os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
-os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
-  
 # Azure OpenAI settings (retrieved from environment variables)  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
