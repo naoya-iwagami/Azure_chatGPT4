@@ -14,7 +14,7 @@ from PIL import Image
 import certifi  
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
-
+  
 # Azure OpenAI settings  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
@@ -90,9 +90,9 @@ def rewrite_query(user_input, recent_messages, system_message=None):
     ]  
   
     response = client.chat.completions.create(  
-        model=st.session_state.get("model_to_use", "gpt-4o"),  
+        model="gpt-4.1",  # ←gpt-4.1に固定しました  
         messages=messages,  
-        max_completion_tokens=256,    
+        max_completion_tokens=256,  
     )  
     rewritten_query = response.choices[0].message.content.strip()  
     return rewritten_query  
