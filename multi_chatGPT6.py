@@ -92,8 +92,7 @@ def rewrite_query(user_input, recent_messages, system_message=None):
     response = client.chat.completions.create(  
         model=st.session_state.get("model_to_use", "gpt-4o"),  
         messages=messages,  
-        max_completion_tokens=256,  
-        temperature=0.2,  
+        max_completion_tokens=256,    
     )  
     rewritten_query = response.choices[0].message.content.strip()  
     return rewritten_query  
