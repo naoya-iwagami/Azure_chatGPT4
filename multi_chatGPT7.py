@@ -15,7 +15,10 @@ import certifi
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
   
-# --- システムメッセージプリセット ---  
+os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
+os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
+  
+# --- デフォルトシステムメッセージ ---  
 DEFAULT_SYSTEM_MESSAGES = [  
     "RAGの情報を優先して利用してください。RAGでない一般情報を利用する場合は、その旨を明確に伝えてください。",  
     "あなたは親切なAIアシスタントです。ユーザーの質問に簡潔かつ正確に答えてください。"  
@@ -42,15 +45,57 @@ cosmos_endpoint = os.getenv("AZURE_COSMOS_ENDPOINT")
 cosmos_key = os.getenv("AZURE_COSMOS_KEY")  
 database_name = "chatdb"  
 container_name = "chathistory"  
+prompt_container_name = "systemprompts"  
 cosmos_client = CosmosClient(cosmos_endpoint, credential=cosmos_key)  
 database = cosmos_client.get_database_client(database_name)  
 container = database.get_container_client(container_name)  
+prompt_container = database.get_container_client(prompt_container_name)  
   
 # Azure Blob Storage settings  
 blob_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")  
 blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)  
   
 lock = threading.Lock()  
+  
+def load_system_prompts():  
+    prompts = []  
+    try:  
+        query = "SELECT * FROM c ORDER BY c.timestamp ASC"  
+        items = prompt_container.query_items(query=query, enable_cross_partition_query=True)  
+        for item in items:  
+            prompts.append({"id": item["id"], "label": item["label"], "message": item["message"]})  
+    except Exception as e:  
+        st.error(f"システムプロンプト読み込みエラー: {e}")  
+    return prompts  
+  
+def add_system_prompt(label, message):  
+    prompt_id = str(uuid.uuid4())  
+    item = {  
+        "id": prompt_id,  
+        "label": label,  
+        "message": message,  
+        "timestamp": datetime.datetime.utcnow().isoformat()  
+    }  
+    try:  
+        prompt_container.upsert_item(item)  
+    except Exception as e:  
+        st.error(f"新規プロンプト追加時エラー: {e}")  
+  
+def delete_system_prompt(prompt_id):  
+    try:  
+        prompt_container.delete_item(item=prompt_id, partition_key=prompt_id)  
+    except Exception as e:  
+        st.error(f"プロンプト削除時エラー: {e}")  
+  
+def initialize_system_prompts():  
+    prompts = []  
+    try:  
+        prompts = list(prompt_container.query_items(query="SELECT * FROM c", enable_cross_partition_query=True))  
+    except Exception as e:  
+        pass  
+    if len(prompts) == 0:  
+        for label, msg in zip(DEFAULT_SYSTEM_MESSAGES_LABELS, DEFAULT_SYSTEM_MESSAGES):  
+            add_system_prompt(label, msg)  
   
 def extract_account_key(connection_string):  
     pairs = [s.split("=", 1) for s in connection_string.split(";") if "=" in s]  
@@ -91,12 +136,10 @@ def rewrite_query(user_input, recent_messages, system_message=None):
         prompt += f"- {msg}\n"  
     prompt += f"【ユーザー質問】\n{user_input}\n"  
     prompt += "【検索用クエリ】"  
-  
     messages = [  
         {"role": "system", "content": system_message or "あなたは有能な検索アシスタントです。"},  
         {"role": "user", "content": prompt}  
     ]  
-  
     response = client.chat.completions.create(  
         model="gpt-4.1",  
         messages=messages,  
@@ -105,14 +148,172 @@ def rewrite_query(user_input, recent_messages, system_message=None):
     rewritten_query = response.choices[0].message.content.strip()  
     return rewritten_query  
   
+def encode_image(image_file):  
+    return base64.b64encode(image_file.getvalue()).decode("utf-8")  
+  
+def save_chat_history():  
+    with lock:  
+        try:  
+            user_id = st.session_state.get("user_id")  
+            current_index = st.session_state.get("current_chat_index")  
+            if current_index is None:  
+                return  
+            current_chat = st.session_state.sidebar_messages[current_index]  
+            session_id = current_chat.get("session_id")  
+            if session_id:  
+                item = {  
+                    "id": session_id,  
+                    "user_id": user_id,  
+                    "session_id": session_id,  
+                    "messages": current_chat.get("messages", []),  
+                    "system_message": current_chat.get("system_message", st.session_state["system_message"]),  
+                    "first_assistant_message": current_chat.get("first_assistant_message", ""),  
+                    "timestamp": datetime.datetime.utcnow().isoformat()  
+                }  
+                container.upsert_item(item)  
+        except Exception as e:  
+            st.error(f"チャット履歴の保存中にエラーが発生しました: {e}")  
+  
+def load_chat_history():  
+    with lock:  
+        user_id = st.session_state.get("user_id")  
+        sidebar_messages = []  
+        try:  
+            query = "SELECT * FROM c WHERE c.user_id = @user_id ORDER BY c.timestamp DESC"  
+            parameters = [{"name": "@user_id", "value": user_id}]  
+            items = container.query_items(  
+                query=query,  
+                parameters=parameters,  
+                enable_cross_partition_query=True  
+            )  
+            for item in items:  
+                if "session_id" in item:  
+                    session_id = item["session_id"]  
+                    chat = {  
+                        "session_id": session_id,  
+                        "messages": item.get("messages", []),  
+                        "system_message": item.get("system_message", st.session_state["system_message"]),  
+                        "first_assistant_message": item.get("first_assistant_message", "")  
+                    }  
+                    sidebar_messages.append(chat)  
+        except Exception as e:  
+            st.error(f"チャット履歴の読み込み中にエラーが発生しました: {e}")  
+        return sidebar_messages  
+  
+def summarize_text(text, max_length=10):  
+    return text[:max_length] + "..." if len(text) > max_length else text  
+  
+def keyword_semantic_search(query, topNDocuments=5, strictness=0.1):  
+    results = search_client.search(  
+        search_text=query,  
+        search_fields=["title", "content"],  
+        select="title, content, filepath, url",  
+        query_type="semantic",  
+        semantic_configuration_name="default",  
+        query_caption="extractive",  
+        query_answer="extractive",  
+        top=topNDocuments  
+    )  
+    results_list = [result for result in results if result.get("@search.score", 0) >= strictness]  
+    results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
+    return results_list  
+  
+def get_query_embedding(query):  
+    embedding_response = client.embeddings.create(  
+        model="text-embedding-3-small",  
+        input=query  
+    )  
+    return embedding_response.data[0].embedding  
+  
+def keyword_vector_search(query, topNDocuments=5):  
+    query_embedding = get_query_embedding(query)  
+    vector_query = {  
+        "kind": "vector",  
+        "vector": query_embedding,  
+        "exhaustive": True,  
+        "fields": "contentVector",  
+        "weight": 0.5,  
+        "k": topNDocuments  
+    }  
+    results = search_client.search(  
+        search_text="*",  
+        vector_queries=[vector_query],  
+        select="title, content, filepath, url"  
+    )  
+    results_list = list(results)  
+    if results_list and "@search.score" in results_list[0]:  
+        results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
+    return results_list  
+  
+def keyword_search(query, topNDocuments=5):  
+    results = search_client.search(  
+        search_text=query,  
+        search_fields=["title", "content"],  
+        select="title, content, filepath, url",  
+        query_type="simple",  
+        top=topNDocuments  
+    )  
+    return list(results)  
+  
+def hybrid_search(query, topNDocuments=5, strictness=0.1):  
+    keyword_results = keyword_search(query, topNDocuments=topNDocuments)  
+    semantic_results = keyword_semantic_search(query, topNDocuments=topNDocuments, strictness=strictness)  
+    vector_results = keyword_vector_search(query, topNDocuments=topNDocuments)  
+    rrf_k = 60  
+    fusion_scores = {}  
+    fusion_docs = {}  
+    for result_list in [keyword_results, semantic_results, vector_results]:  
+        for idx, result in enumerate(result_list):  
+            doc_id = result.get("filepath") or result.get("title")  
+            if not doc_id:  
+                continue  
+            contribution = 1 / (rrf_k + (idx + 1))  
+            fusion_scores[doc_id] = fusion_scores.get(doc_id, 0) + contribution  
+            if doc_id not in fusion_docs:  
+                fusion_docs[doc_id] = result  
+    sorted_doc_ids = sorted(fusion_scores, key=lambda d: fusion_scores[d], reverse=True)  
+    fused_results = []  
+    for doc_id in sorted_doc_ids[:topNDocuments]:  
+        result = fusion_docs[doc_id]  
+        result["fusion_score"] = fusion_scores[doc_id]  
+        fused_results.append(result)  
+    return fused_results  
+  
+def start_new_chat():  
+    new_session_id = str(uuid.uuid4())  
+    default_msg = st.session_state["system_message"]  
+    new_chat = {  
+        "session_id": new_session_id,  
+        "messages": [],  
+        "first_assistant_message": "",  
+        "system_message": default_msg  
+    }  
+    st.session_state.sidebar_messages.insert(0, new_chat)  
+    st.session_state["current_chat_index"] = 0  
+    st.session_state.system_message = new_chat["system_message"]  
+    st.session_state.main_chat_messages = []  
+    st.session_state.images = []  
+    st.session_state["last_search_query"] = ""  
+  
+def display_images():  
+    # === ここでサブヘッダー「アップロードされた画像」の表記を消すためこの一行を削除 ===  
+    # st.subheader("アップロードされた画像")  
+    for idx, img_data in enumerate(st.session_state["images"]):  
+        st.image(img_data["image"], caption=img_data["name"], use_container_width=True)  
+        if st.button(f"削除 {img_data['name']}", key=f"delete_{idx}"):  
+            st.session_state["images"].pop(idx)  
+            st.rerun()  
+  
 def main():  
-    # --- セッション変数初期化 ---  
-    if "default_system_messages" not in st.session_state:  
-        st.session_state["default_system_messages"] = DEFAULT_SYSTEM_MESSAGES  
-    if "selected_system_message_index" not in st.session_state:  
-        st.session_state["selected_system_message_index"] = 0  
-    if "last_selected_system_message_index" not in st.session_state:  
-        st.session_state["last_selected_system_message_index"] = 0  
+    initialize_system_prompts()  
+  
+    # ------ セッション変数初期化 ------  
+    if "system_prompts" not in st.session_state:  
+        st.session_state["system_prompts"] = load_system_prompts()  
+    if "selected_prompt_index" not in st.session_state:  
+        st.session_state["selected_prompt_index"] = 0  
+    if "last_selected_prompt_index" not in st.session_state:  
+        st.session_state["last_selected_prompt_index"] = 0  
     if "sidebar_messages" not in st.session_state:  
         st.session_state["sidebar_messages"] = []  
     if "main_chat_messages" not in st.session_state:  
@@ -124,13 +325,11 @@ def main():
     if "show_all_history" not in st.session_state:  
         st.session_state["show_all_history"] = False  
     if "system_message" not in st.session_state:  
-        st.session_state["system_message"] = st.session_state["default_system_messages"][0]  
+        st.session_state["system_message"] = st.session_state["system_prompts"][0]["message"]  
     if "last_search_query" not in st.session_state:  
         st.session_state["last_search_query"] = ""  
-    if "past_message_count" not in st.session_state:  
-        st.session_state["past_message_count"] = 10  
   
-    # ユーザー情報取得  
+    # ----- ユーザー認証 -----  
     if hasattr(st, "experimental_user"):  
         user = st.experimental_user  
         if user and "email" in user:  
@@ -144,7 +343,7 @@ def main():
   
     st.title("Azure OpenAI ChatGPT with Image Upload and RAG")  
   
-    # サイドバー：モデル選択  
+    # ----- モデル選択 -----  
     st.sidebar.header("モデル選択")  
     model_options = ["gpt-4o", "o1", "o4-mini", "o3", "gpt-4.1", "gpt-4.5-preview"]  
     st.session_state["model_to_use"] = st.sidebar.selectbox(  
@@ -165,7 +364,7 @@ def main():
     else:  
         st.session_state.pop("reasoning_effort", None)  
   
-    # サイドバー：インデックス選択  
+    # ----- インデックス選択 -----  
     st.sidebar.header("インデックス選択")  
     index_options = {  
         "通常データ": "filetest11",  
@@ -193,7 +392,7 @@ def main():
         api_version="2024-07-01"  
     )  
   
-    # --- クエリ生成方法の選択 ---  
+    # ----- クエリ生成方法 選択 -----  
     st.sidebar.header("検索クエリ生成方法")  
     query_generation_method = st.sidebar.radio(  
         "検索クエリの生成方法を選択してください",  
@@ -202,285 +401,153 @@ def main():
         key="query_generation_method"  
     )  
   
-    def encode_image(image_file):  
-        return base64.b64encode(image_file.getvalue()).decode("utf-8")  
-  
-    def save_chat_history():  
-        with lock:  
-            try:  
-                user_id = st.session_state.get("user_id")  
-                current_index = st.session_state.get("current_chat_index")  
-                if current_index is None:  
-                    return  
-                current_chat = st.session_state.sidebar_messages[current_index]  
-                session_id = current_chat.get("session_id")  
-                if session_id:  
-                    item = {  
-                        "id": session_id,  
-                        "user_id": user_id,  
-                        "session_id": session_id,  
-                        "messages": current_chat.get("messages", []),  
-                        "system_message": current_chat.get("system_message", st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]),  
-                        "first_assistant_message": current_chat.get("first_assistant_message", ""),  
-                        "timestamp": datetime.datetime.utcnow().isoformat()  
-                    }  
-                    container.upsert_item(item)  
-            except Exception as e:  
-                st.error(f"チャット履歴の保存中にエラーが発生しました: {e}")  
-  
-    def load_chat_history():  
-        with lock:  
-            user_id = st.session_state.get("user_id")  
-            sidebar_messages = []  
-            try:  
-                query = "SELECT * FROM c WHERE c.user_id = @user_id ORDER BY c.timestamp DESC"  
-                parameters = [{"name": "@user_id", "value": user_id}]  
-                items = container.query_items(  
-                    query=query,  
-                    parameters=parameters,  
-                    enable_cross_partition_query=True  
-                )  
-                for item in items:  
-                    if "session_id" in item:  
-                        session_id = item["session_id"]  
-                        chat = {  
-                            "session_id": session_id,  
-                            "messages": item.get("messages", []),  
-                            "system_message": item.get("system_message", st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]),  
-                            "first_assistant_message": item.get("first_assistant_message", "")  
-                        }  
-                        sidebar_messages.append(chat)  
-            except Exception as e:  
-                st.error(f"チャット履歴の読み込み中にエラーが発生しました: {e}")  
-            return sidebar_messages  
-  
-    if not st.session_state["sidebar_messages"]:  
-        st.session_state["sidebar_messages"] = load_chat_history()  
-  
-    def start_new_chat():  
-        new_session_id = str(uuid.uuid4())  
-        default_msg = st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]  
-        new_chat = {  
-            "session_id": new_session_id,  
-            "messages": [],  
-            "first_assistant_message": "",  
-            "system_message": default_msg  
-        }  
-        st.session_state.sidebar_messages.insert(0, new_chat)  
-        st.session_state["current_chat_index"] = 0  
-        st.session_state.system_message = new_chat["system_message"]  
-        st.session_state.main_chat_messages = []  
-        st.session_state.images = []  
-        st.session_state["last_search_query"] = ""  
-  
-    if st.session_state["current_chat_index"] is None:  
-        start_new_chat()  
-  
-    def summarize_text(text, max_length=10):  
-        return text[:max_length] + "..." if len(text) > max_length else text  
-  
+    # ----- サイドバー：デフォルトシステムメッセージ管理 -----  
     with st.sidebar:  
         st.header("システムメッセージ設定")  
-        # --- ラジオボタンでプリセット選択 ---  
+        with st.expander("新しいデフォルトシステムメッセージを追加"):  
+            new_label = st.text_input("新規ラベル", key="new_prompt_label")  
+            new_message = st.text_area("新規プロンプト本文", key="new_prompt_message")  
+            if st.button("追加", key="add_prompt_btn"):  
+                if new_label and new_message:  
+                    add_system_prompt(new_label, new_message)  
+                    st.session_state["system_prompts"] = load_system_prompts()  
+                    st.rerun()  
+                else:  
+                    st.warning("ラベルとメッセージ両方を入力してください。")  
+  
+        prompt_labels = [p["label"] for p in st.session_state["system_prompts"]]  
         selected_index = st.radio(  
             "デフォルトシステムメッセージを選択してください",  
-            options=list(range(len(DEFAULT_SYSTEM_MESSAGES))),  
-            format_func=lambda i: DEFAULT_SYSTEM_MESSAGES_LABELS[i],  
-            index=st.session_state["selected_system_message_index"],  
-            key="system_message_radio"  
+            options=list(range(len(prompt_labels))),  
+            format_func=lambda i: prompt_labels[i],  
+            index=st.session_state["selected_prompt_index"],  
+            key="system_prompt_radio"  
         )  
-  
-        # プリセット変更時はチャットごとのシステムメッセージも上書きする  
-        if st.session_state["last_selected_system_message_index"] != selected_index:  
-            if st.session_state["current_chat_index"] is not None:  
-                st.session_state.sidebar_messages[st.session_state["current_chat_index"]]["system_message"] = st.session_state["default_system_messages"][selected_index]  
-                st.session_state.system_message = st.session_state["default_system_messages"][selected_index]  
-            st.session_state["selected_system_message_index"] = selected_index  
-            st.session_state["last_selected_system_message_index"] = selected_index  
+        if st.session_state["last_selected_prompt_index"] != selected_index:  
+            st.session_state["selected_prompt_index"] = selected_index  
+            st.session_state["last_selected_prompt_index"] = selected_index  
+            st.session_state["system_message"] = st.session_state["system_prompts"][selected_index]["message"]  
             st.rerun()  
         else:  
-            st.session_state["selected_system_message_index"] = selected_index  
-            st.session_state["last_selected_system_message_index"] = selected_index  
+            st.session_state["selected_prompt_index"] = selected_index  
+            st.session_state["last_selected_prompt_index"] = selected_index  
   
-        # --- テキストエリア ---  
-        if st.session_state["current_chat_index"] is not None:  
-            current_system_message = st.session_state.sidebar_messages[st.session_state["current_chat_index"]].get(  
-                "system_message",  
-                st.session_state["default_system_messages"][selected_index]  
-            )  
-        else:  
-            current_system_message = st.session_state["default_system_messages"][selected_index]  
-  
-        system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
+        system_message_key = f"sysmsg_{selected_index}"  
         system_message = st.text_area(  
             "システムメッセージを入力・編集してください",  
-            value=current_system_message,  
+            value=st.session_state["system_prompts"][selected_index]["message"],  
             height=100,  
             key=system_message_key  
         )  
-        if st.session_state["current_chat_index"] is not None:  
-            st.session_state.sidebar_messages[st.session_state["current_chat_index"]]["system_message"] = system_message  
-            st.session_state.system_message = system_message  
   
-        st.header("チャット履歴")  
-        max_displayed_history = 5  
-        max_total_history = 20  
-        sidebar_msgs = [  
-            (index, chat)  
-            for index, chat in enumerate(st.session_state.sidebar_messages)  
-            if chat.get("first_assistant_message")  
-        ]  
-        if not st.session_state["show_all_history"]:  
-            sidebar_msgs = sidebar_msgs[:max_displayed_history]  
+        prompt_id = st.session_state["system_prompts"][selected_index]["id"]  
+        if st.button("このプロンプト内容を保存", key="save_edit_prompt"):  
+            try:  
+                updated_item = {  
+                    "id": prompt_id,  
+                    "label": st.session_state["system_prompts"][selected_index]["label"],  
+                    "message": system_message,  
+                    "timestamp": datetime.datetime.utcnow().isoformat()  
+                }  
+                prompt_container.upsert_item(updated_item)  
+                st.session_state["system_prompts"] = load_system_prompts()  
+                st.session_state["system_message"] = system_message  
+                st.success("保存しました")  
+                st.rerun()  
+            except Exception as e:  
+                st.error(f"保存時エラー: {e}")  
+  
+        if len(st.session_state["system_prompts"]) > 1:  
+            if st.button("このプロンプトを削除", key="delete_this_prompt"):  
+                delete_system_prompt(prompt_id)  
+                st.session_state["system_prompts"] = load_system_prompts()  
+                st.session_state["selected_prompt_index"] = 0  
+                st.session_state["last_selected_prompt_index"] = 0  
+                st.session_state["system_message"] = st.session_state["system_prompts"][0]["message"]  
+                st.success("削除しました")  
+                st.rerun()  
         else:  
-            sidebar_msgs = sidebar_msgs[:max_total_history]  
-        for i, (orig_index, chat) in enumerate(sidebar_msgs):  
-            if chat and "first_assistant_message" in chat:  
-                keyword = summarize_text(chat["first_assistant_message"])  
-                if st.button(keyword, key=f"history_{i}"):  
-                    st.session_state["current_chat_index"] = orig_index  
-                    st.session_state.main_chat_messages = chat.get("messages", []).copy()  
-                    st.session_state.system_message = chat.get("system_message", st.session_state["default_system_messages"][selected_index])  
-                    system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
-                    if system_message_key in st.session_state:  
-                        del st.session_state[system_message_key]  
-                    st.rerun()  
+            st.info("少なくとも1つはプロンプトを残す必要があります。")  
   
-        if len(st.session_state.sidebar_messages) > max_displayed_history:  
-            if st.session_state["show_all_history"]:  
-                if st.button("少なく表示"):  
-                    st.session_state["show_all_history"] = False  
-                    st.rerun()  
-            else:  
-                if st.button("もっと見る"):  
-                    st.session_state["show_all_history"] = True  
-                    st.rerun()  
+    # ----- チャット履歴 -----  
+    st.sidebar.header("チャット履歴")    # ←←← これを追加  
   
-        if st.button("新しいチャット"):  
-            start_new_chat()  
-            st.session_state["show_all_history"] = False  
-            st.rerun()  
+    if not st.session_state["sidebar_messages"]:  
+        st.session_state["sidebar_messages"] = load_chat_history()  
+    max_displayed_history = 5  
+    max_total_history = 20  
+    sidebar_msgs = [  
+        (index, chat)  
+        for index, chat in enumerate(st.session_state.sidebar_messages)  
+        if chat.get("first_assistant_message")  
+    ]  
+    if not st.session_state["show_all_history"]:  
+        sidebar_msgs = sidebar_msgs[:max_displayed_history]  
+    else:  
+        sidebar_msgs = sidebar_msgs[:max_total_history]  
+    for i, (orig_index, chat) in enumerate(sidebar_msgs):  
+        if chat and "first_assistant_message" in chat:  
+            keyword = summarize_text(chat["first_assistant_message"])  
+            if st.sidebar.button(keyword, key=f"history_{i}"):  
+                st.session_state["current_chat_index"] = orig_index  
+                st.session_state.main_chat_messages = chat.get("messages", []).copy()  
+                st.session_state.system_message = chat.get("system_message", st.session_state["system_message"])  
+                system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
+                if system_message_key in st.session_state:  
+                    del st.session_state[system_message_key]  
+                st.rerun()  
+    if len(st.session_state.sidebar_messages) > max_displayed_history:  
+        if st.session_state["show_all_history"]:  
+            if st.sidebar.button("少なく表示"):  
+                st.session_state["show_all_history"] = False  
+                st.rerun()  
+        else:  
+            if st.sidebar.button("もっと見る"):  
+                st.session_state["show_all_history"] = True  
+                st.rerun()  
+    if st.sidebar.button("新しいチャット"):  
+        start_new_chat()  
+        st.session_state["show_all_history"] = False  
+        st.rerun()  
   
-        st.header("画像アップロード")  
-        uploaded_files = st.file_uploader(  
-            "画像を選択してください", type=["jpg", "jpeg", "png"],  
-            key="uploader", accept_multiple_files=True  
-        )  
-        if uploaded_files:  
-            for uploaded_file in uploaded_files:  
-                image = Image.open(uploaded_file)  
-                encoded_image = encode_image(uploaded_file)  
-                if not any(img["name"] == uploaded_file.name for img in st.session_state["images"]):  
-                    st.session_state["images"].append({  
-                        "image": image,  
-                        "encoded": encoded_image,  
-                        "name": uploaded_file.name  
-                    })  
-                    st.success(f"画像 '{uploaded_file.name}' がアップロードされました。")  
+    # 画像アップロード  
+    st.sidebar.header("画像アップロード")  
+    uploaded_files = st.sidebar.file_uploader(  
+        "画像を選択してください", type=["jpg", "jpeg", "png"],  
+        key="uploader", accept_multiple_files=True  
+    )  
+    if uploaded_files:  
+        for uploaded_file in uploaded_files:  
+            image = Image.open(uploaded_file)  
+            encoded_image = encode_image(uploaded_file)  
+            if not any(img["name"] == uploaded_file.name for img in st.session_state["images"]):  
+                st.session_state["images"].append({  
+                    "image": image,  
+                    "encoded": encoded_image,  
+                    "name": uploaded_file.name  
+                })  
+                st.sidebar.success(f"画像 '{uploaded_file.name}' がアップロードされました。")  
+    display_images()  
   
-        def display_images():  
-            st.subheader("アップロードされた画像")  
-            for idx, img_data in enumerate(st.session_state["images"]):  
-                st.image(img_data["image"], caption=img_data["name"], use_container_width=True)  
-                if st.button(f"削除 {img_data['name']}", key=f"delete_{idx}"):  
-                    st.session_state["images"].pop(idx)  
-                    st.rerun()  
-        display_images()  
+    past_message_count = st.sidebar.slider(  
+        "過去メッセージの数", min_value=1, max_value=50,  
+        value=st.session_state.get("past_message_count", 10), key="past_message_count"  
+    )  
   
-        past_message_count = st.slider(  
-            "過去メッセージの数", min_value=1, max_value=50, value=st.session_state["past_message_count"], key="past_message_count"  
-        )  
-        st.header("検索設定")  
-        search_mode = st.radio(  
-            "検索モードを選択してください",  
-            options=["セマンティック検索", "ベクトル検索", "ハイブリッド検索"],  
-            index=0  
-        )  
-        topNDocuments = st.slider("取得するドキュメント数", min_value=1, max_value=300, value=5)  
-        strictness = st.slider("厳密度 (スコアの閾値)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)  
-  
-    def keyword_semantic_search(query, topNDocuments=5, strictness=0.1):  
-        results = search_client.search(  
-            search_text=query,  
-            search_fields=["title", "content"],  
-            select="title, content, filepath, url",  
-            query_type="semantic",  
-            semantic_configuration_name="default",  
-            query_caption="extractive",  
-            query_answer="extractive",  
-            top=topNDocuments  
-        )  
-        results_list = [result for result in results if result.get("@search.score", 0) >= strictness]  
-        results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
-        return results_list  
-  
-    def get_query_embedding(query):  
-        embedding_response = client.embeddings.create(  
-            model="text-embedding-3-small",  
-            input=query  
-        )  
-        return embedding_response.data[0].embedding  
-  
-    def keyword_vector_search(query, topNDocuments=5):  
-        query_embedding = get_query_embedding(query)  
-        vector_query = {  
-            "kind": "vector",  
-            "vector": query_embedding,  
-            "exhaustive": True,  
-            "fields": "contentVector",  
-            "weight": 0.5,  
-            "k": topNDocuments  
-        }  
-        results = search_client.search(  
-            search_text="*",  
-            vector_queries=[vector_query],  
-            select="title, content, filepath, url"  
-        )  
-        results_list = list(results)  
-        if results_list and "@search.score" in results_list[0]:  
-            results_list.sort(key=lambda x: x.get("@search.score", 0), reverse=True)  
-        return results_list  
-  
-    def keyword_search(query, topNDocuments=5):  
-        results = search_client.search(  
-            search_text=query,  
-            search_fields=["title", "content"],  
-            select="title, content, filepath, url",  
-            query_type="simple",  
-            top=topNDocuments  
-        )  
-        return list(results)  
-  
-    def hybrid_search(query, topNDocuments=5, strictness=0.1):  
-        keyword_results = keyword_search(query, topNDocuments=topNDocuments)  
-        semantic_results = keyword_semantic_search(query, topNDocuments=topNDocuments, strictness=strictness)  
-        vector_results = keyword_vector_search(query, topNDocuments=topNDocuments)  
-        rrf_k = 60  
-        fusion_scores = {}  
-        fusion_docs = {}  
-        for result_list in [keyword_results, semantic_results, vector_results]:  
-            for idx, result in enumerate(result_list):  
-                doc_id = result.get("filepath") or result.get("title")  
-                if not doc_id:  
-                    continue  
-                contribution = 1 / (rrf_k + (idx + 1))  
-                fusion_scores[doc_id] = fusion_scores.get(doc_id, 0) + contribution  
-                if doc_id not in fusion_docs:  
-                    fusion_docs[doc_id] = result  
-        sorted_doc_ids = sorted(fusion_scores, key=lambda d: fusion_scores[d], reverse=True)  
-        fused_results = []  
-        for doc_id in sorted_doc_ids[:topNDocuments]:  
-            result = fusion_docs[doc_id]  
-            result["fusion_score"] = fusion_scores[doc_id]  
-            fused_results.append(result)  
-        return fused_results  
+    st.sidebar.header("検索設定")  
+    search_mode = st.sidebar.radio(  
+        "検索モードを選択してください",  
+        options=["セマンティック検索", "ベクトル検索", "ハイブリッド検索"],  
+        index=0  
+    )  
+    topNDocuments = st.sidebar.slider("取得するドキュメント数", min_value=1, max_value=300, value=5)  
+    strictness = st.sidebar.slider("厳密度 (スコアの閾値)", min_value=0.0, max_value=10.0, value=0.1, step=0.1)  
   
     # --- チャット履歴の表示 ---  
     for message in st.session_state["main_chat_messages"]:  
         with st.chat_message(message["role"]):  
             st.markdown(message["content"])  
-  
-    # --- 検索クエリの表示（チャット履歴の直後） ---  
+    # --- 検索クエリの表示 ---  
     if st.session_state.get("last_search_query"):  
         st.markdown(  
             f"""<div style="background-color: #f0f2f6; padding: 10px; border-radius: 8px; margin-bottom: 10px;">  
@@ -490,14 +557,12 @@ def main():
             """, unsafe_allow_html=True  
         )  
   
-    # --- チャット入力欄 ---  
-    prompt = st.chat_input("ご質問を入力してください:")  
+    prompt_input = st.chat_input("ご質問を入力してください:")  
   
     # --- 入力受付 ---  
-    if prompt:  
-        user_input = prompt  
+    if prompt_input:  
+        user_input = prompt_input  
         recent_messages = [m["content"] for m in st.session_state["main_chat_messages"]][-4:]  
-  
         if st.session_state.get("query_generation_method", "シンプル結合") == "クエリリライト":  
             with st.spinner("検索用クエリを生成中..."):  
                 search_query = rewrite_query(user_input, recent_messages, st.session_state["system_message"])  
@@ -530,15 +595,11 @@ def main():
             content_val = result.get("content", "")  
             context_parts.append(f"ファイル名: {title}\n内容: {content_val}")  
         context = "\n".join(context_parts)  
-        initial_context = f"以下のコンテキストを参考にしてください: {context[:50000]}"  
-  
         rule_message = (  
             "回答する際は、以下のルールに従ってください：\n"  
             "必要に応じて、提供されたコンテキストを参照してください。\n"  
         )  
-  
-        past_message_count = st.session_state.get("past_message_count", 10)  
-        num_messages_to_include = past_message_count * 2  
+        num_messages_to_include = st.session_state["past_message_count"] * 2  
         messages = []  
         messages.append({"role": "system", "content": st.session_state["system_message"]})  
         messages.append({"role": "user", "content": rule_message})  
@@ -600,7 +661,6 @@ def main():
                 st.session_state.sidebar_messages[current_index]["messages"] = st.session_state["main_chat_messages"].copy()  
                 if not st.session_state.sidebar_messages[current_index].get("first_assistant_message"):  
                     st.session_state.sidebar_messages[current_index]["first_assistant_message"] = assistant_response  
-  
                 save_chat_history()  
             st.session_state["images"] = []  
   
@@ -614,4 +674,4 @@ def main():
         save_chat_history()  
   
 if __name__ == "__main__":  
-    main()
+    main()  
