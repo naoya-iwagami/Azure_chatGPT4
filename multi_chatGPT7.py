@@ -14,7 +14,17 @@ from PIL import Image
 import certifi  
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
-
+  
+# --- システムメッセージプリセット ---  
+DEFAULT_SYSTEM_MESSAGES = [  
+    "RAGの情報を優先して利用してください。RAGでない一般情報を利用する場合は、その旨を明確に伝えてください。",  
+    "あなたは親切なAIアシスタントです。ユーザーの質問に簡潔かつ正確に答えてください。"  
+]  
+DEFAULT_SYSTEM_MESSAGES_LABELS = [  
+    "RAG優先",  
+    "親切なAIアシスタント"  
+]  
+  
 # Azure OpenAI settings  
 client = AzureOpenAI(  
     api_key=os.getenv("AZURE_OPENAI_KEY"),  
@@ -25,7 +35,6 @@ client = AzureOpenAI(
 # Azure Cognitive Search settings  
 search_service_endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")  
 search_service_key = os.getenv("AZURE_SEARCH_KEY")  
-  
 transport = RequestsTransport(verify=certifi.where())  
   
 # Azure Cosmos DB settings  
@@ -33,7 +42,6 @@ cosmos_endpoint = os.getenv("AZURE_COSMOS_ENDPOINT")
 cosmos_key = os.getenv("AZURE_COSMOS_KEY")  
 database_name = "chatdb"  
 container_name = "chathistory"  
-  
 cosmos_client = CosmosClient(cosmos_endpoint, credential=cosmos_key)  
 database = cosmos_client.get_database_client(database_name)  
 container = database.get_container_client(container_name)  
@@ -90,7 +98,7 @@ def rewrite_query(user_input, recent_messages, system_message=None):
     ]  
   
     response = client.chat.completions.create(  
-        model="gpt-4.1",  # ←gpt-4.1に固定しました  
+        model="gpt-4.1",  
         messages=messages,  
         max_completion_tokens=256,  
     )  
@@ -98,6 +106,30 @@ def rewrite_query(user_input, recent_messages, system_message=None):
     return rewritten_query  
   
 def main():  
+    # --- セッション変数初期化 ---  
+    if "default_system_messages" not in st.session_state:  
+        st.session_state["default_system_messages"] = DEFAULT_SYSTEM_MESSAGES  
+    if "selected_system_message_index" not in st.session_state:  
+        st.session_state["selected_system_message_index"] = 0  
+    if "last_selected_system_message_index" not in st.session_state:  
+        st.session_state["last_selected_system_message_index"] = 0  
+    if "sidebar_messages" not in st.session_state:  
+        st.session_state["sidebar_messages"] = []  
+    if "main_chat_messages" not in st.session_state:  
+        st.session_state["main_chat_messages"] = []  
+    if "images" not in st.session_state:  
+        st.session_state["images"] = []  
+    if "current_chat_index" not in st.session_state:  
+        st.session_state["current_chat_index"] = None  
+    if "show_all_history" not in st.session_state:  
+        st.session_state["show_all_history"] = False  
+    if "system_message" not in st.session_state:  
+        st.session_state["system_message"] = st.session_state["default_system_messages"][0]  
+    if "last_search_query" not in st.session_state:  
+        st.session_state["last_search_query"] = ""  
+    if "past_message_count" not in st.session_state:  
+        st.session_state["past_message_count"] = 10  
+  
     # ユーザー情報取得  
     if hasattr(st, "experimental_user"):  
         user = st.experimental_user  
@@ -111,26 +143,6 @@ def main():
         st.stop()  
   
     st.title("Azure OpenAI ChatGPT with Image Upload and RAG")  
-  
-    # セッション初期化  
-    if "sidebar_messages" not in st.session_state:  
-        st.session_state["sidebar_messages"] = []  
-    if "main_chat_messages" not in st.session_state:  
-        st.session_state["main_chat_messages"] = []  
-    if "images" not in st.session_state:  
-        st.session_state["images"] = []  
-    if "current_chat_index" not in st.session_state:  
-        st.session_state["current_chat_index"] = None  
-    if "show_all_history" not in st.session_state:  
-        st.session_state["show_all_history"] = False  
-    if "default_system_message" not in st.session_state:  
-        st.session_state["default_system_message"] = "あなたは親切なAIアシスタントです。ユーザーの質問に簡潔かつ正確に答えてください。"  
-    if "system_message" not in st.session_state:  
-        st.session_state["system_message"] = st.session_state["default_system_message"]  
-    if "last_search_query" not in st.session_state:  
-        st.session_state["last_search_query"] = ""  
-    if "past_message_count" not in st.session_state:  
-        st.session_state["past_message_count"] = 10  
   
     # サイドバー：モデル選択  
     st.sidebar.header("モデル選択")  
@@ -162,7 +174,7 @@ def main():
         "L8＋製膜データ": "filetest15",  
         "予備１": "filetest16",  
         "予備２": "filetest17",  
-        "予備３": "filetest18",
+        "予備３": "filetest18",  
         "品質保証": "quality-assurance"  
     }  
     selected_index_label = st.sidebar.selectbox(  
@@ -208,7 +220,7 @@ def main():
                         "user_id": user_id,  
                         "session_id": session_id,  
                         "messages": current_chat.get("messages", []),  
-                        "system_message": current_chat.get("system_message", st.session_state.get("default_system_message", "")),  
+                        "system_message": current_chat.get("system_message", st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]),  
                         "first_assistant_message": current_chat.get("first_assistant_message", ""),  
                         "timestamp": datetime.datetime.utcnow().isoformat()  
                     }  
@@ -234,7 +246,7 @@ def main():
                         chat = {  
                             "session_id": session_id,  
                             "messages": item.get("messages", []),  
-                            "system_message": item.get("system_message", st.session_state.get("default_system_message", "")),  
+                            "system_message": item.get("system_message", st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]),  
                             "first_assistant_message": item.get("first_assistant_message", "")  
                         }  
                         sidebar_messages.append(chat)  
@@ -247,11 +259,12 @@ def main():
   
     def start_new_chat():  
         new_session_id = str(uuid.uuid4())  
+        default_msg = st.session_state["default_system_messages"][st.session_state["selected_system_message_index"]]  
         new_chat = {  
             "session_id": new_session_id,  
             "messages": [],  
             "first_assistant_message": "",  
-            "system_message": st.session_state["default_system_message"]  
+            "system_message": default_msg  
         }  
         st.session_state.sidebar_messages.insert(0, new_chat)  
         st.session_state["current_chat_index"] = 0  
@@ -268,16 +281,39 @@ def main():
   
     with st.sidebar:  
         st.header("システムメッセージ設定")  
+        # --- ラジオボタンでプリセット選択 ---  
+        selected_index = st.radio(  
+            "デフォルトシステムメッセージを選択してください",  
+            options=list(range(len(DEFAULT_SYSTEM_MESSAGES))),  
+            format_func=lambda i: DEFAULT_SYSTEM_MESSAGES_LABELS[i],  
+            index=st.session_state["selected_system_message_index"],  
+            key="system_message_radio"  
+        )  
+  
+        # プリセット変更時はチャットごとのシステムメッセージも上書きする  
+        if st.session_state["last_selected_system_message_index"] != selected_index:  
+            if st.session_state["current_chat_index"] is not None:  
+                st.session_state.sidebar_messages[st.session_state["current_chat_index"]]["system_message"] = st.session_state["default_system_messages"][selected_index]  
+                st.session_state.system_message = st.session_state["default_system_messages"][selected_index]  
+            st.session_state["selected_system_message_index"] = selected_index  
+            st.session_state["last_selected_system_message_index"] = selected_index  
+            st.rerun()  
+        else:  
+            st.session_state["selected_system_message_index"] = selected_index  
+            st.session_state["last_selected_system_message_index"] = selected_index  
+  
+        # --- テキストエリア ---  
         if st.session_state["current_chat_index"] is not None:  
             current_system_message = st.session_state.sidebar_messages[st.session_state["current_chat_index"]].get(  
-                "system_message", st.session_state["default_system_message"]  
+                "system_message",  
+                st.session_state["default_system_messages"][selected_index]  
             )  
         else:  
-            current_system_message = st.session_state["default_system_message"]  
+            current_system_message = st.session_state["default_system_messages"][selected_index]  
   
         system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
         system_message = st.text_area(  
-            "システムメッセージを入力してください",  
+            "システムメッセージを入力・編集してください",  
             value=current_system_message,  
             height=100,  
             key=system_message_key  
@@ -304,7 +340,7 @@ def main():
                 if st.button(keyword, key=f"history_{i}"):  
                     st.session_state["current_chat_index"] = orig_index  
                     st.session_state.main_chat_messages = chat.get("messages", []).copy()  
-                    st.session_state.system_message = chat.get("system_message", st.session_state["default_system_message"])  
+                    st.session_state.system_message = chat.get("system_message", st.session_state["default_system_messages"][selected_index])  
                     system_message_key = f"system_message_{st.session_state['current_chat_index']}"  
                     if system_message_key in st.session_state:  
                         del st.session_state[system_message_key]  
@@ -349,7 +385,6 @@ def main():
                 if st.button(f"削除 {img_data['name']}", key=f"delete_{idx}"):  
                     st.session_state["images"].pop(idx)  
                     st.rerun()  
-  
         display_images()  
   
         past_message_count = st.slider(  
@@ -468,11 +503,9 @@ def main():
                 search_query = rewrite_query(user_input, recent_messages, st.session_state["system_message"])  
         else:  
             search_query = user_input + " " + " ".join(recent_messages)  
-  
-        # 検索クエリをセッションに保存し、即座に再描画  
         st.session_state["last_search_query"] = search_query  
         st.session_state["main_chat_messages"].append({"role": "user", "content": user_input})  
-        st.rerun()  # ここで再描画  
+        st.rerun()  
   
     # --- ユーザー入力後の処理 ---  
     if (  
@@ -537,7 +570,7 @@ def main():
             assistant_response = response.choices[0].message.content  
   
             st.session_state["main_chat_messages"].append({"role": "assistant", "content": assistant_response})  
-            st.session_state["main_chat_messages"][-2]["handled"] = True  # この質問は処理済み  
+            st.session_state["main_chat_messages"][-2]["handled"] = True  
   
             with st.chat_message("assistant"):  
                 st.markdown(assistant_response)  
@@ -581,4 +614,4 @@ def main():
         save_chat_history()  
   
 if __name__ == "__main__":  
-    main()  
+    main()
