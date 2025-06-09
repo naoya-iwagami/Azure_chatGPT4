@@ -15,9 +15,6 @@ import certifi
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions  
 from urllib.parse import urlparse, unquote, quote  
   
-os.environ['HTTP_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
-os.environ['HTTPS_PROXY'] = 'http://g3.konicaminolta.jp:8080'  
-  
 # --- デフォルトシステムメッセージ ---  
 DEFAULT_SYSTEM_MESSAGES = [  
     "RAGの情報を優先して利用してください。RAGでない一般情報を利用する場合は、その旨を明確に伝えてください。",  
